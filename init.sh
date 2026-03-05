@@ -3,7 +3,7 @@
 # ---------------------------------------------------------
 # init.sh - Debian init script for my usual configuration |
 # ---------------------------------------------------------
-
+#
 # > Rename machine if needed
 # > Install the following packages :
 #   - git
@@ -13,8 +13,7 @@
 #   - zsh
 #   - gpg
 #   - sudo
-#   - docker
-#   - sudo
+#   - docker (via repo)
 #   - openssh-server
 # > Configure the shell :
 #   - zsh
@@ -29,7 +28,9 @@
 #
 # Usage:
 #   sudo ./init.sh
-#   sudo ./init.sh --rename myhost
+#   ./init.sh            # run as root (recommended right after install)
+#   ./init.sh --rename myhost
+#
 
 set -Eeuo pipefail
 IFS=$'\n\t'
@@ -39,7 +40,7 @@ die() { echo "ERROR: $*" >&2; exit 1; }
 info() { echo "INFO: $*"; }
 
 require_root() {
-  [[ "${EUID}" -eq 0 ]] || die "This script must be run as root (use sudo)."
+  [[ "${EUID}" -eq 0 ]] || die "This script must be run as root."
 }
 
 have_cmd() { command -v "$1" >/dev/null 2>&1; }
@@ -53,8 +54,8 @@ is_debian_like() {
 confirm_or_exit() {
   local answer=""
   echo "You are about to initialise this machine."
-  echo "This will install packages, configure Docker repo, configure SSH, grant NOPASSWD sudo to current user,"
-  echo "add current user to docker group, and configure Zsh for root and current user."
+  echo "This will install packages, configure Docker repo, configure SSH, grant NOPASSWD sudo to a target user,"
+  echo "add that user to docker group, and configure Zsh for root and that user."
   read -r -p "Continue? [y/N] " answer
   answer="${answer,,}"
   [[ "$answer" == "y" || "$answer" == "yes" ]] || die "Aborted by user."
@@ -111,7 +112,6 @@ install_docker_debian() {
   have_cmd curl || die "curl is required for Docker install step."
   have_cmd gpg  || die "gpg is required for Docker key handling."
 
-  # shellcheck disable=SC1091
   . /etc/os-release
   local codename="${VERSION_CODENAME:-}"
   [[ -n "$codename" ]] || die "VERSION_CODENAME is empty; cannot configure Docker repo."
@@ -132,7 +132,6 @@ install_docker_debian() {
 
   curl -fsSL "https://download.docker.com/linux/debian/gpg" -o "$key_tmp"
   gpg --batch --quiet --show-keys "$key_tmp" >/dev/null 2>&1 || die "Downloaded Docker GPG key is not a valid public key."
-
   gpg --batch --yes --dearmor -o "$keyring" "$key_tmp"
   chmod 0644 "$keyring"
 
@@ -160,6 +159,10 @@ ensure_user_nopasswd_sudo() {
   [[ -n "$user" ]] || die "ensure_user_nopasswd_sudo: missing user"
   [[ "$user" != "root" ]] || { info "User is root; skipping sudoers grant."; return 0; }
 
+  if ! id -u "$user" >/dev/null 2>&1; then
+    die "Target user '$user' does not exist."
+  fi
+
   if ! dpkg -s sudo >/dev/null 2>&1; then
     info "Installing sudo package..."
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends sudo
@@ -171,7 +174,6 @@ ensure_user_nopasswd_sudo() {
   info "Granting passwordless sudo to user '$user' via $sudoers_file"
   printf "%s\n" "$line" > "$sudoers_file"
   chmod 0440 "$sudoers_file"
-
   visudo -cf "$sudoers_file" >/dev/null 2>&1 || die "visudo validation failed for $sudoers_file"
   info "sudoers entry validated."
 }
@@ -180,6 +182,10 @@ ensure_user_in_docker_group() {
   local user="$1"
   [[ -n "$user" ]] || die "ensure_user_in_docker_group: missing user"
   [[ "$user" != "root" ]] || { info "User is root; skipping docker group membership."; return 0; }
+
+  if ! id -u "$user" >/dev/null 2>&1; then
+    die "Target user '$user' does not exist."
+  fi
 
   if ! getent group docker >/dev/null 2>&1; then
     info "Creating 'docker' group"
@@ -220,8 +226,8 @@ set_sshd_allowusers() {
 }
 
 configure_ssh() {
-  local current_user="$1"
-  [[ -n "$current_user" ]] || die "configure_ssh: missing current user (SUDO_USER)."
+  local target_user="$1"
+  [[ -n "$target_user" ]] || die "configure_ssh: missing target user."
 
   apt_install openssh-server
 
@@ -234,7 +240,7 @@ configure_ssh() {
   set_sshd_directive "$cfg" "PermitRootLogin" "no"
   set_sshd_directive "$cfg" "PasswordAuthentication" "yes"
   set_sshd_directive "$cfg" "PermitEmptyPasswords" "no"
-  set_sshd_allowusers "$cfg" "$current_user"
+  set_sshd_allowusers "$cfg" "$target_user"
 
   if have_cmd systemctl; then
     info "Enabling and restarting ssh service"
@@ -388,7 +394,6 @@ main() {
   is_debian_like || die "This script currently supports Debian-like systems only."
 
   local rename_host=""
-
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --rename) rename_host="${2:-}"; shift 2 ;;
@@ -396,9 +401,13 @@ main() {
     esac
   done
 
-  local current_user="${SUDO_USER:-}"
-  if [[ -z "$current_user" || "$current_user" == "root" ]]; then
-    die "This script expects to be run via sudo from a non-root user (SUDO_USER missing or root)."
+  # target user selection:
+  # prefer SUDO_USER if present, otherwise default to 'user' (as requested)
+  local target_user="${SUDO_USER:-user}"
+
+  # quick existence check
+  if ! id -u "$target_user" >/dev/null 2>&1; then
+    die "Target user '$target_user' does not exist. Create it or run the script with --user <name> (not implemented interactive in this variant)."
   fi
 
   confirm_or_exit
@@ -412,25 +421,29 @@ main() {
   info "Updating apt index"
   apt-get update -y
 
-  apt_install git curl net-tools ca-certificates zsh gpg sudo
+  # Base packages (including openssh-server and sudo)
+  apt_install git curl net-tools ca-certificates zsh gpg sudo openssh-server
 
   install_docker_debian
 
-  configure_ssh "$current_user"
+  # Configure SSH (target_user)
+  configure_ssh "$target_user"
 
+  # Configure root
   configure_zsh_for_account "root" "/root"
 
-  local current_home
-  current_home="$(getent passwd "$current_user" | cut -d: -f6)"
-  [[ -n "$current_home" ]] || die "Could not determine home for user: $current_user"
+  # Configure target user: sudo nopasswd, docker group, zsh
+  local target_home
+  target_home="$(getent passwd "$target_user" | cut -d: -f6)"
+  [[ -n "$target_home" ]] || die "Could not determine home for user: $target_user"
 
-  ensure_user_nopasswd_sudo "$current_user"
-  ensure_user_in_docker_group "$current_user"
-  configure_zsh_for_account "$current_user" "$current_home"
+  ensure_user_nopasswd_sudo "$target_user"
+  ensure_user_in_docker_group "$target_user"
+  configure_zsh_for_account "$target_user" "$target_home"
 
   info "Initialisation complete."
-  info "Note: docker group change requires a new login/session for '$current_user'."
-  info "For each configured account, you can run: exec zsh ; p10k configure"
+  info "Note: docker group membership requires a new login/session for '$target_user' to take effect."
+  info "To finish user UI tasks: su - $target_user  # then: exec zsh ; p10k configure"
 }
 
 main "$@"
