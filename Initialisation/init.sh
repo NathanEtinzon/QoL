@@ -1,37 +1,5 @@
 #!/usr/bin/env bash
 
-# ---------------------------------------------------------
-# init.sh - Debian init script for my usual configuration |
-# ---------------------------------------------------------
-#
-# > Rename machine if needed
-# > Install the following packages :
-#   - git
-#   - curl
-#   - net-tools
-#   - ca-certificates
-#   - zsh
-#   - gpg
-#   - sudo
-#   - docker (via repo)
-#   - openssh-server
-# > Configure the shell :
-#   - zsh
-#   - oh-my-zsh
-#   - plugins
-#       - git
-#       - sudo
-#       - zsh-autosuggestions
-#       - zsh-syntax-highlighting
-#   - p10k
-# > Configure ssh
-#
-# Usage:
-#   sudo ./init.sh
-#   ./init.sh            # run as root (recommended right after install)
-#   ./init.sh --rename myhost
-#
-
 set -Eeuo pipefail
 IFS=$'\n\t'
 umask 027
