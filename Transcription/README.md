@@ -2,8 +2,6 @@
 
 Petit Script Python permettant de transcrire des fichiers audio (MP3, WAV, etc.) en texte à l’aide de **Faster-Whisper**, avec support **GPU (CUDA)** et fallback automatique vers **CPU**.
 
----
-
 ## Fonctionnalités
 
 - Transcription audio via Whisper (OpenAI)
@@ -13,8 +11,6 @@ Petit Script Python permettant de transcrire des fichiers audio (MP3, WAV, etc.)
 - Détection automatique ou forcée de la langue
 - Gestion robuste des erreurs
 - Compatible Windows / Linux
-
----
 
 ## Prérequis
 
@@ -26,8 +22,6 @@ Petit Script Python permettant de transcrire des fichiers audio (MP3, WAV, etc.)
 ```bash
 pip install faster-whisper colorama
 ```
-
----
 
 ## Option GPU (facultatif mais recommandé)
 
@@ -44,8 +38,6 @@ nvidia-smi
 
 ⚠️ Si CUDA n’est pas disponible, le script proposera automatiquement de basculer en CPU.
 
----
-
 ## Utilisation
 
 ### Commande de base
@@ -60,8 +52,6 @@ python transcript.py -i "chemin/vers/audio.mp3"
 python transcript.py -i "C:\audio\podcast.mp3" -o resultat.txt -m medium -l fr
 ```
 
----
-
 ## Options disponibles
 
 |Option|Description|
@@ -70,8 +60,6 @@ python transcript.py -i "C:\audio\podcast.mp3" -o resultat.txt -m medium -l fr
 |`-o`, `--output`|Fichier de sortie (défaut : transcription.txt)|
 |`-m`, `--model`|Modèle Whisper (tiny, base, small, medium, large-v3)|
 |`-l`, `--language`|Langue (ex: fr) ou `auto`|
-
----
 
 ## Modèles disponibles
 
@@ -83,16 +71,12 @@ python transcript.py -i "C:\audio\podcast.mp3" -o resultat.txt -m medium -l fr
 |medium|très bonne|plus lent|
 |large-v3|excellente|lent|
 
----
-
 ## Exemple de sortie
 
 ```text
 [12.34s -> 15.67s] Bonjour et bienvenue sur ce podcast...
 [15.67s -> 18.90s] Aujourd’hui nous allons parler de cybersécurité...
 ```
-
----
 
 ## Logs
 
@@ -111,16 +95,12 @@ Exemple :
 [QUESTION] Basculer sur CPU ? (Y/N)
 ```
 
----
-
 ## Bonnes pratiques
 
 - Privilégier le traitement local pour données sensibles
 - Ne pas exécuter en administrateur sauf nécessité
 - Vérifier les dépendances CUDA si utilisation GPU
 - Stocker les résultats dans un environnement sécurisé
-
----
 
 ## Limitations
 
