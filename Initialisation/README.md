@@ -1,83 +1,157 @@
 # Script d'initialisation Debian
 
-Script d’initialisation pour déployer rapidement un environnement Debian prêt à l’usage avec mes configurations standards (shell, outils, Docker, SSH).
+Script d'initialisation non interactif pour deployer rapidement un environnement Debian pret a l'usage avec des configurations standards : shell, outils, Docker et SSH.
 
 ## Objectif
 
 Ce script permet de :
 
-* automatiser la configuration post-installation d’un système Debian
+* automatiser la configuration post-installation d'un systeme Debian
 * standardiser un environnement de travail
 * gagner du temps lors du provisioning (VM, serveur, lab)
+* eviter les prompts bloquants pendant l'installation
 
-## Fonctionnalités
+## Fonctionnalites
 
 ### Installation des paquets essentiels
 
-Le script installe automatiquement :
+Le script installe automatiquement les outils necessaires selon les options activees :
 
 * git
 * curl
+* wget
 * net-tools
 * ca-certificates
 * zsh
 * gpg
 * sudo
 * openssh-server
-* docker (via dépôt officiel)
+* docker (via depot officiel)
+
+Les commandes apt sont executees en mode non interactif avec :
+
+* `DEBIAN_FRONTEND=noninteractive`
+* `APT_LISTCHANGES_FRONTEND=none`
+* `NEEDRESTART_MODE=a`
+* conservation automatique des fichiers de configuration existants via options `dpkg`
 
 ### Configuration du shell
 
-* Passage en **zsh**
 * Installation de **Oh My Zsh**
 * Plugins :
-
   * git
   * sudo
   * zsh-autosuggestions
   * zsh-syntax-highlighting
-* Thème **Powerlevel10k (p10k)**
+* Theme **Powerlevel10k**
+* Recuperation automatique de `.p10k.zsh` via `wget`
+
+La configuration Powerlevel10k par defaut est telechargee depuis :
+
+```bash
+https://raw.githubusercontent.com/NathanEtinzon/QoL/main/Initialisation/.p10k.zsh
+```
+
+L'URL peut etre surchargee :
+
+```bash
+sudo env P10K_CONFIG_URL="https://example.org/.p10k.zsh" ./init.sh --user nathan
+```
 
 ### Configuration SSH
 
-* Activation du service SSH
-* Configuration de base pour accès distant
+* Installation et activation du service SSH
+* `PermitRootLogin no`
+* `PermitEmptyPasswords no`
+* `PasswordAuthentication no` par defaut
 
-### Renommage de la machine
+Les actions sensibles sont explicites :
 
-Possibilité de renommer le hostname via option CLI.
+* `--ssh-password-auth yes` active l'authentification SSH par mot de passe
+* `--restrict-ssh-user` ajoute `AllowUsers <user>`
+
+### Actions sensibles opt-in
+
+Par defaut, le script ne modifie pas les points suivants :
+
+* pas de `NOPASSWD: ALL`
+* pas de changement de shell par defaut avec `chsh`
+* pas de restriction `AllowUsers`
+* pas d'activation SSH password auth
+
+Options disponibles :
+
+```bash
+--enable-nopasswd-sudo
+--set-default-shell
+--ssh-password-auth yes
+--restrict-ssh-user
+```
 
 ## Utilisation
 
-### Exécution standard (recommandé)
+### Execution standard
 
 ```bash
-sudo ./init.sh
-```
-
-### Exécution en root
-
-```bash
-./init.sh
+sudo ./init.sh --user nathan
 ```
 
 ### Renommer la machine
 
 ```bash
-./init.sh --rename mon-hostname
+sudo ./init.sh --user nathan --rename debian-lab01
 ```
 
-## Prérequis
+### Installation complete avec actions sensibles explicites
 
-* Debian (testé sur Debian 11/12)
-* Accès root ou sudo
+```bash
+sudo ./init.sh \
+  --user nathan \
+  --rename debian-lab01 \
+  --enable-nopasswd-sudo \
+  --set-default-shell \
+  --ssh-password-auth no \
+  --restrict-ssh-user
+```
+
+### Desactiver certains blocs
+
+```bash
+sudo ./init.sh --user nathan --skip-docker
+sudo ./init.sh --user nathan --skip-ssh
+sudo ./init.sh --user nathan --skip-zsh
+```
+
+### Aide
+
+```bash
+sudo ./init.sh --help
+```
+
+## Options
+
+* `--user <name>` : utilisateur cible. Par defaut : `SUDO_USER`, puis `user`
+* `--rename <hostname>` : renomme la machine
+* `--skip-zsh` : ignore Zsh, Oh My Zsh et Powerlevel10k
+* `--skip-docker` : ignore Docker
+* `--skip-ssh` : ignore SSH
+* `--skip-chsh` : ne change pas le shell par defaut, comportement par defaut
+* `--set-default-shell` : passe le shell par defaut a zsh
+* `--enable-nopasswd-sudo` : accorde `NOPASSWD: ALL` a l'utilisateur cible
+* `--ssh-password-auth <yes|no>` : configure `PasswordAuthentication`, par defaut `no`
+* `--restrict-ssh-user` : ajoute `AllowUsers <user>` dans `sshd_config`
+
+## Prerequis
+
+* Debian ou derive Debian (teste sur Debian 11/12)
+* Acces root ou sudo
 * Connexion Internet
 
-## Cas d’usage
+## Cas d'usage
 
-* Déploiement rapide VM (lab, école, tests)
-* Bootstrap serveur perso
-* Environnement de dev standardisé
+* Deploiement rapide VM (lab, ecole, tests)
+* Bootstrap serveur personnel
+* Environnement de developpement standardise
 * Formation / TP
 
 ## Licence

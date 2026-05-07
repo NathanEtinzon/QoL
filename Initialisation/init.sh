@@ -4,6 +4,12 @@ set -Eeuo pipefail
 IFS=$'\n\t'
 umask 027
 
+export DEBIAN_FRONTEND=noninteractive
+export APT_LISTCHANGES_FRONTEND=none
+export NEEDRESTART_MODE=a
+
+DEFAULT_P10K_CONFIG_URL="https://raw.githubusercontent.com/NathanEtinzon/QoL/main/Initialisation/.p10k.zsh"
+
 die() { echo "ERROR: $*" >&2; exit 1; }
 info() { echo "INFO: $*"; }
 
@@ -13,20 +19,50 @@ require_root() {
 
 have_cmd() { command -v "$1" >/dev/null 2>&1; }
 
+usage() {
+  cat <<'EOF'
+Usage: ./init.sh [options]
+
+Options:
+  --user <name>                 Target user to configure. Defaults to SUDO_USER, then 'user'.
+  --rename <hostname>           Rename the machine.
+  --skip-zsh                    Skip Zsh, Oh My Zsh and Powerlevel10k configuration.
+  --skip-docker                 Skip Docker repository and package installation.
+  --skip-ssh                    Skip SSH server configuration.
+  --skip-chsh                   Do not change the default shell. This is the default behavior.
+  --set-default-shell           Change the default shell to zsh for configured accounts.
+  --enable-nopasswd-sudo        Grant NOPASSWD sudo to the target user.
+  --ssh-password-auth <yes|no>  Set SSH PasswordAuthentication. Defaults to 'no'.
+  --restrict-ssh-user           Restrict SSH login to the target user with AllowUsers.
+  -h, --help                    Show this help.
+
+Environment:
+  P10K_CONFIG_URL               Override the default Powerlevel10k config URL.
+EOF
+}
+
+valid_yes_no() {
+  [[ "$1" == "yes" || "$1" == "no" ]]
+}
+
 is_debian_like() {
   [[ -r /etc/os-release ]] || return 1
   . /etc/os-release
   [[ "${ID:-}" == "debian" || "${ID_LIKE:-}" == *"debian"* ]]
 }
 
-confirm_or_exit() {
-  local answer=""
-  echo "You are about to initialise this machine."
-  echo "This will install packages, configure Docker repo, configure SSH, grant NOPASSWD sudo to a target user,"
-  echo "add that user to docker group, and configure Zsh for root and that user."
-  read -r -p "Continue? [y/N] " answer
-  answer="${answer,,}"
-  [[ "$answer" == "y" || "$answer" == "yes" ]] || die "Aborted by user."
+apt_update() {
+  apt-get -o Dpkg::Use-Pty=0 update -y
+}
+
+apt_install_noninteractive() {
+  apt-get \
+    -o Dpkg::Use-Pty=0 \
+    install -y \
+    -o Dpkg::Options::=--force-confdef \
+    -o Dpkg::Options::=--force-confold \
+    --no-install-recommends \
+    "$@"
 }
 
 apt_install() {
@@ -37,7 +73,7 @@ apt_install() {
   done
   if ((${#missing[@]})); then
     info "Installing packages: ${missing[*]}"
-    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "${missing[@]}"
+    apt_install_noninteractive "${missing[@]}"
   else
     info "Packages already installed: ${pkgs[*]}"
   fi
@@ -111,7 +147,7 @@ Components: stable
 Signed-By: ${keyring}
 EOF
 
-  apt-get update -y
+  apt_update
   apt_install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
 
   if have_cmd systemctl; then
@@ -133,7 +169,7 @@ ensure_user_nopasswd_sudo() {
 
   if ! dpkg -s sudo >/dev/null 2>&1; then
     info "Installing sudo package..."
-    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends sudo
+    apt_install_noninteractive sudo
   fi
 
   local sudoers_file="/etc/sudoers.d/90-${user}-nopasswd"
@@ -195,7 +231,10 @@ set_sshd_allowusers() {
 
 configure_ssh() {
   local target_user="$1"
+  local password_auth="$2"
+  local restrict_user="$3"
   [[ -n "$target_user" ]] || die "configure_ssh: missing target user."
+  valid_yes_no "$password_auth" || die "configure_ssh: invalid PasswordAuthentication value: $password_auth"
 
   apt_install openssh-server
 
@@ -206,9 +245,13 @@ configure_ssh() {
   cp -a "$cfg" "${cfg}.bak.$(date +%F_%H%M%S)"
 
   set_sshd_directive "$cfg" "PermitRootLogin" "no"
-  set_sshd_directive "$cfg" "PasswordAuthentication" "yes"
+  set_sshd_directive "$cfg" "PasswordAuthentication" "$password_auth"
   set_sshd_directive "$cfg" "PermitEmptyPasswords" "no"
-  set_sshd_allowusers "$cfg" "$target_user"
+  if [[ "$restrict_user" == "true" ]]; then
+    set_sshd_allowusers "$cfg" "$target_user"
+  else
+    info "SSH AllowUsers restriction not requested. Leaving existing policy unchanged."
+  fi
 
   if have_cmd systemctl; then
     info "Enabling and restarting ssh service"
@@ -219,9 +262,44 @@ configure_ssh() {
   fi
 }
 
+run_as_account() {
+  local user="$1"
+  shift
+
+  if [[ "$user" == "root" ]]; then
+    "$@"
+  else
+    sudo -u "$user" "$@"
+  fi
+}
+
+install_p10k_config() {
+  local user="$1"
+  local home="$2"
+  local url="${P10K_CONFIG_URL:-$DEFAULT_P10K_CONFIG_URL}"
+  local target="${home}/.p10k.zsh"
+  local tmp
+
+  have_cmd wget || die "wget is required to download Powerlevel10k config."
+  tmp="$(mktemp)"
+
+  info "Downloading Powerlevel10k config for '$user' from $url"
+  if ! wget --quiet --timeout=30 --tries=3 -O "$tmp" "$url"; then
+    rm -f "$tmp"
+    die "Failed to download Powerlevel10k config from $url"
+  fi
+  install -m 0644 "$tmp" "$target"
+  rm -f "$tmp"
+
+  if [[ "$user" != "root" ]]; then
+    chown "$user:" "$target"
+  fi
+}
+
 configure_zsh_for_account() {
   local user="$1"
   local home="$2"
+  local set_default_shell="$3"
 
   [[ -n "$user" && -n "$home" ]] || die "configure_zsh_for_account: missing user/home."
   [[ -d "$home" ]] || die "Home directory not found: $home"
@@ -232,28 +310,16 @@ configure_zsh_for_account() {
 
   info "Configuring Zsh/oh-my-zsh for '$user' (home: $home)"
 
-  if [[ "$user" == "root" ]]; then
-    mkdir -p "${zsh_custom}/plugins" "${zsh_custom}/themes"
-  else
-    sudo -u "$user" mkdir -p "${zsh_custom}/plugins" "${zsh_custom}/themes"
-  fi
+  run_as_account "$user" mkdir -p "${zsh_custom}/plugins" "${zsh_custom}/themes"
 
   if [[ ! -d "$omz_dir" ]]; then
-    if [[ "$user" == "root" ]]; then
-      git clone --depth=1 https://github.com/ohmyzsh/ohmyzsh.git "$omz_dir"
-    else
-      sudo -u "$user" git clone --depth=1 https://github.com/ohmyzsh/ohmyzsh.git "$omz_dir"
-    fi
+    run_as_account "$user" git clone --depth=1 https://github.com/ohmyzsh/ohmyzsh.git "$omz_dir"
   else
     info "oh-my-zsh already present for '$user'."
   fi
 
   if [[ ! -f "$zshrc" ]]; then
-    if [[ "$user" == "root" ]]; then
-      cp "${omz_dir}/templates/zshrc.zsh-template" "$zshrc"
-    else
-      sudo -u "$user" cp "${omz_dir}/templates/zshrc.zsh-template" "$zshrc"
-    fi
+    run_as_account "$user" cp "${omz_dir}/templates/zshrc.zsh-template" "$zshrc"
   fi
 
   local p1="${zsh_custom}/plugins/zsh-syntax-highlighting"
@@ -261,97 +327,60 @@ configure_zsh_for_account() {
   local th="${zsh_custom}/themes/powerlevel10k"
 
   if [[ ! -d "$p1" ]]; then
-    if [[ "$user" == "root" ]]; then
-      git clone --depth=1 https://github.com/zsh-users/zsh-syntax-highlighting.git "$p1"
-    else
-      sudo -u "$user" git clone --depth=1 https://github.com/zsh-users/zsh-syntax-highlighting.git "$p1"
-    fi
+    run_as_account "$user" git clone --depth=1 https://github.com/zsh-users/zsh-syntax-highlighting.git "$p1"
   fi
 
   if [[ ! -d "$p2" ]]; then
-    if [[ "$user" == "root" ]]; then
-      git clone --depth=1 https://github.com/zsh-users/zsh-autosuggestions "$p2"
-    else
-      sudo -u "$user" git clone --depth=1 https://github.com/zsh-users/zsh-autosuggestions "$p2"
-    fi
+    run_as_account "$user" git clone --depth=1 https://github.com/zsh-users/zsh-autosuggestions "$p2"
   fi
 
   if [[ ! -d "$th" ]]; then
-    if [[ "$user" == "root" ]]; then
-      git clone --depth=1 https://github.com/romkatv/powerlevel10k.git "$th"
+    run_as_account "$user" git clone --depth=1 https://github.com/romkatv/powerlevel10k.git "$th"
+  fi
+
+  run_as_account "$user" env ZSHRC="$zshrc" OMZ_DIR="$omz_dir" HOME="$home" bash -c '
+    set -euo pipefail
+
+    if grep -qE "^ZSH=" "$ZSHRC"; then
+      sed -i -E "s|^ZSH=.*|ZSH=\"$OMZ_DIR\"|" "$ZSHRC"
     else
-      sudo -u "$user" git clone --depth=1 https://github.com/romkatv/powerlevel10k.git "$th"
+      printf "\nZSH=\"%s\"\n" "$OMZ_DIR" >> "$ZSHRC"
     fi
-  fi
 
-  if [[ "$user" == "root" ]]; then
-    bash -c "
-      set -euo pipefail
-      zshrc='$zshrc'
-      omz='$omz_dir'
+    if grep -qE "^ZSH_THEME=" "$ZSHRC"; then
+      sed -i -E "s|^ZSH_THEME=.*|ZSH_THEME=\"powerlevel10k/powerlevel10k\"|" "$ZSHRC"
+    else
+      printf "\nZSH_THEME=\"powerlevel10k/powerlevel10k\"\n" >> "$ZSHRC"
+    fi
 
-      if grep -qE '^ZSH=' \"\$zshrc\"; then
-        sed -i -E \"s|^ZSH=.*|ZSH=\\\"$omz\\\"|\" \"\$zshrc\"
-      else
-        printf '\\nZSH=\"%s\"\\n' \"$omz\" >> \"\$zshrc\"
+    if ! grep -qE "^plugins=\(" "$ZSHRC"; then
+      printf "\nplugins=(git)\n" >> "$ZSHRC"
+    fi
+
+    required="git sudo zsh-autosuggestions zsh-syntax-highlighting"
+    current="$(grep -E "^plugins=\(" "$ZSHRC" | head -n1 | sed -E "s/^plugins=\((.*)\)/\1/")"
+    merged="$(printf "%s\n" $current $required | awk "NF && !seen[\$0]++" | tr "\n" " " | xargs)"
+    sed -i -E "s/^plugins=\(.*\)/plugins=($merged)/" "$ZSHRC"
+
+    if ! grep -qF "[[ ! -f ~/.p10k.zsh ]] || source ~/.p10k.zsh" "$ZSHRC"; then
+      printf "\n[[ ! -f ~/.p10k.zsh ]] || source ~/.p10k.zsh\n" >> "$ZSHRC"
+    fi
+  '
+
+  install_p10k_config "$user" "$home"
+
+  if [[ "$set_default_shell" == "true" ]]; then
+    local zsh_path
+    zsh_path="$(command -v zsh || true)"
+    if [[ -n "$zsh_path" ]]; then
+      local current_shell
+      current_shell="$(getent passwd "$user" | cut -d: -f7)"
+      if [[ "$current_shell" != "$zsh_path" ]]; then
+        chsh -s "$zsh_path" "$user" || info "Could not change default shell for $user (maybe restricted)."
       fi
-
-      if grep -qE '^ZSH_THEME=' \"\$zshrc\"; then
-        sed -i -E 's|^ZSH_THEME=.*|ZSH_THEME=\"powerlevel10k/powerlevel10k\"|' \"\$zshrc\"
-      else
-        printf '\\nZSH_THEME=\"powerlevel10k/powerlevel10k\"\\n' >> \"\$zshrc\"
-      fi
-
-      if ! grep -qE '^plugins=\\(' \"\$zshrc\"; then
-        printf '\\nplugins=(git)\\n' >> \"\$zshrc\"
-      fi
-
-      required='git sudo zsh-autosuggestions zsh-syntax-highlighting'
-      current=\$(grep -E '^plugins=\\(' \"\$zshrc\" | head -n1 | sed -E 's/^plugins=\\((.*)\\)/\\1/')
-      merged=\"\$current \$required\"
-      merged=\$(echo \"\$merged\" | tr ' ' '\\n' | awk 'NF{a[\$0]=1} END{for(k in a) print k}' | tr '\\n' ' ')
-      merged=\$(echo \"\$merged\" | xargs)
-      sed -i -E \"s/^plugins=\\(.*\\)/plugins=(\$merged)/\" \"\$zshrc\"
-    "
+    fi
   else
-    sudo -u "$user" bash -c "
-      set -euo pipefail
-      zshrc='$zshrc'
-      omz='$omz_dir'
-
-      if grep -qE '^ZSH=' \"\$zshrc\"; then
-        sed -i -E \"s|^ZSH=.*|ZSH=\\\"$omz\\\"|\" \"\$zshrc\"
-      else
-        printf '\\nZSH=\"%s\"\\n' \"$omz\" >> \"\$zshrc\"
-      fi
-
-      if grep -qE '^ZSH_THEME=' \"\$zshrc\"; then
-        sed -i -E 's|^ZSH_THEME=.*|ZSH_THEME=\"powerlevel10k/powerlevel10k\"|' \"\$zshrc\"
-      else
-        printf '\\nZSH_THEME=\"powerlevel10k/powerlevel10k\"\\n' >> \"\$zshrc\"
-      fi
-
-      if ! grep -qE '^plugins=\\(' \"\$zshrc\"; then
-        printf '\\nplugins=(git)\\n' >> \"\$zshrc\"
-      fi
-
-      required='git sudo zsh-autosuggestions zsh-syntax-highlighting'
-      current=\$(grep -E '^plugins=\\(' \"\$zshrc\" | head -n1 | sed -E 's/^plugins=\\((.*)\\)/\\1/')
-      merged=\"\$current \$required\"
-      merged=\$(echo \"\$merged\" | tr ' ' '\\n' | awk 'NF{a[\$0]=1} END{for(k in a) print k}' | tr '\\n' ' ')
-      merged=\$(echo \"\$merged\" | xargs)
-      sed -i -E \"s/^plugins=\\(.*\\)/plugins=(\$merged)/\" \"\$zshrc\"
-    "
-  fi
-
-  local zsh_path
-  zsh_path="$(command -v zsh || true)"
-  if [[ -n "$zsh_path" ]]; then
-    local current_shell
-    current_shell="$(getent passwd "$user" | cut -d: -f7)"
-    if [[ "$current_shell" != "$zsh_path" ]]; then
-      chsh -s "$zsh_path" "$user" || info "Could not change default shell for $user (maybe restricted)."
-    fi
+    info "Default shell change not requested for '$user'."
   fi
 
   info "Zsh/oh-my-zsh configured for '$user'."
@@ -362,23 +391,79 @@ main() {
   is_debian_like || die "This script currently supports Debian-like systems only."
 
   local rename_host=""
+  local target_user="${SUDO_USER:-user}"
+  local configure_zsh="true"
+  local install_docker="true"
+  local configure_ssh_service="true"
+  local grant_nopasswd_sudo="false"
+  local set_default_shell="false"
+  local ssh_password_auth="no"
+  local restrict_ssh_user="false"
+
   while [[ $# -gt 0 ]]; do
     case "$1" in
-      --rename) rename_host="${2:-}"; shift 2 ;;
+      --user)
+        [[ -n "${2:-}" ]] || die "--user requires a value."
+        target_user="$2"
+        shift 2
+        ;;
+      --rename)
+        [[ -n "${2:-}" ]] || die "--rename requires a value."
+        rename_host="$2"
+        shift 2
+        ;;
+      --skip-zsh)
+        configure_zsh="false"
+        shift
+        ;;
+      --skip-docker)
+        install_docker="false"
+        shift
+        ;;
+      --skip-ssh)
+        configure_ssh_service="false"
+        shift
+        ;;
+      --skip-chsh)
+        set_default_shell="false"
+        shift
+        ;;
+      --set-default-shell)
+        set_default_shell="true"
+        shift
+        ;;
+      --enable-nopasswd-sudo)
+        grant_nopasswd_sudo="true"
+        shift
+        ;;
+      --ssh-password-auth)
+        [[ -n "${2:-}" ]] || die "--ssh-password-auth requires a value: yes or no."
+        valid_yes_no "$2" || die "--ssh-password-auth must be 'yes' or 'no'."
+        ssh_password_auth="$2"
+        shift 2
+        ;;
+      --restrict-ssh-user)
+        restrict_ssh_user="true"
+        shift
+        ;;
+      -h|--help)
+        usage
+        exit 0
+        ;;
       *) die "Unknown option: $1" ;;
     esac
   done
 
-  # target user selection:
-  # prefer SUDO_USER if present, otherwise default to 'user' (as requested)
-  local target_user="${SUDO_USER:-user}"
-
-  # quick existence check
   if ! id -u "$target_user" >/dev/null 2>&1; then
-    die "Target user '$target_user' does not exist. Create it or run the script with --user <name> (not implemented interactive in this variant)."
+    die "Target user '$target_user' does not exist. Create it or run the script with --user <name>."
   fi
 
-  confirm_or_exit
+  if [[ "$configure_zsh" != "true" && "$set_default_shell" == "true" ]]; then
+    die "--set-default-shell cannot be used with --skip-zsh."
+  fi
+
+  info "Running in non-interactive mode."
+  info "Target user: $target_user"
 
   if [[ -n "$rename_host" ]]; then
     set_hostname_safe "$rename_host"
@@ -387,31 +472,59 @@ main() {
   fi
 
   info "Updating apt index"
-  apt-get update -y
+  apt_update
 
-  # Base packages (including openssh-server and sudo)
-  apt_install git curl net-tools ca-certificates zsh gpg sudo openssh-server
+  local base_packages=(git curl net-tools ca-certificates gpg sudo)
+  if [[ "$configure_zsh" == "true" ]]; then
+    base_packages+=(zsh wget)
+  fi
+  if [[ "$configure_ssh_service" == "true" ]]; then
+    base_packages+=(openssh-server)
+  fi
+  apt_install "${base_packages[@]}"
 
-  install_docker_debian
+  if [[ "$install_docker" == "true" ]]; then
+    install_docker_debian
+  else
+    info "Docker installation skipped."
+  fi
 
-  # Configure SSH (target_user)
-  configure_ssh "$target_user"
+  if [[ "$configure_ssh_service" == "true" ]]; then
+    configure_ssh "$target_user" "$ssh_password_auth" "$restrict_ssh_user"
+  else
+    info "SSH configuration skipped."
+  fi
 
-  # Configure root
-  configure_zsh_for_account "root" "/root"
+  if [[ "$configure_zsh" == "true" ]]; then
+    configure_zsh_for_account "root" "/root" "$set_default_shell"
+  else
+    info "Zsh configuration skipped for root."
+  fi
 
-  # Configure target user: sudo nopasswd, docker group, zsh
   local target_home
   target_home="$(getent passwd "$target_user" | cut -d: -f6)"
   [[ -n "$target_home" ]] || die "Could not determine home for user: $target_user"
 
-  ensure_user_nopasswd_sudo "$target_user"
-  ensure_user_in_docker_group "$target_user"
-  configure_zsh_for_account "$target_user" "$target_home"
+  if [[ "$grant_nopasswd_sudo" == "true" ]]; then
+    ensure_user_nopasswd_sudo "$target_user"
+  else
+    info "NOPASSWD sudo grant not requested for '$target_user'."
+  fi
+
+  if [[ "$install_docker" == "true" ]]; then
+    ensure_user_in_docker_group "$target_user"
+  fi
+
+  if [[ "$configure_zsh" == "true" ]]; then
+    configure_zsh_for_account "$target_user" "$target_home" "$set_default_shell"
+  else
+    info "Zsh configuration skipped for '$target_user'."
+  fi
 
   info "Initialisation complete."
-  info "Note: docker group membership requires a new login/session for '$target_user' to take effect."
-  info "To finish user UI tasks: su - $target_user  # then: exec zsh ; p10k configure"
+  if [[ "$install_docker" == "true" ]]; then
+    info "Note: docker group membership requires a new login/session for '$target_user' to take effect."
+  fi
 }
 
 main "$@"
