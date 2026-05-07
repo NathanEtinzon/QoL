@@ -273,6 +273,29 @@ run_as_account() {
   fi
 }
 
+ensure_oh_my_zsh() {
+  local user="$1"
+  local omz_dir="$2"
+  local template="${omz_dir}/templates/zshrc.zsh-template"
+
+  if [[ -f "$template" ]]; then
+    info "oh-my-zsh already present for '$user'."
+    return 0
+  fi
+
+  if [[ -e "$omz_dir" ]]; then
+    local backup_dir="${omz_dir}.bak.$(date +%F_%H%M%S)"
+    info "Incomplete oh-my-zsh directory found for '$user'. Moving it to '$backup_dir'."
+    mv "$omz_dir" "$backup_dir"
+    if [[ "$user" != "root" ]]; then
+      chown -R "$user:" "$backup_dir"
+    fi
+  fi
+
+  run_as_account "$user" git clone --depth=1 https://github.com/ohmyzsh/ohmyzsh.git "$omz_dir"
+  [[ -f "$template" ]] || die "oh-my-zsh installation failed for '$user': missing $template"
+}
+
 install_p10k_config() {
   local user="$1"
   local home="$2"
@@ -310,13 +333,8 @@ configure_zsh_for_account() {
 
   info "Configuring Zsh/oh-my-zsh for '$user' (home: $home)"
 
+  ensure_oh_my_zsh "$user" "$omz_dir"
   run_as_account "$user" mkdir -p "${zsh_custom}/plugins" "${zsh_custom}/themes"
-
-  if [[ ! -d "$omz_dir" ]]; then
-    run_as_account "$user" git clone --depth=1 https://github.com/ohmyzsh/ohmyzsh.git "$omz_dir"
-  else
-    info "oh-my-zsh already present for '$user'."
-  fi
 
   if [[ ! -f "$zshrc" ]]; then
     run_as_account "$user" cp "${omz_dir}/templates/zshrc.zsh-template" "$zshrc"
